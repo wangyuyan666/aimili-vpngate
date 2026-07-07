@@ -105,6 +105,10 @@ def bounded_int(value: Any, default: int, min_value: int | None = None, max_valu
     return parsed
 
 API_URL = "https://www.vpngate.net/api/iphone/"
+VPNBOOK_URL = "https://www.vpnbook.com/freevpn/openvpn"
+VPNBOOK_CONFIG_API = "https://www.vpnbook.com/api/openvpn"
+VPNBOOK_PROTOCOLS = ("tcp443", "tcp80", "udp53", "udp25000")
+NODE_PROVIDERS = ("vpngate", "vpnbook")
 FETCH_INTERVAL_SECONDS = env_int("FETCH_INTERVAL_SECONDS", 1260, 1)
 CHECK_INTERVAL_SECONDS = env_int("CHECK_INTERVAL_SECONDS", 1260, 1)
 TARGET_VALID_NODES = env_int("TARGET_VALID_NODES", 3, 1)
@@ -125,8 +129,10 @@ ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__"
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
 CONFIG_DIR = DATA_DIR / "configs"
 NODES_FILE = DATA_DIR / "nodes.json"
+VPNBOOK_NODES_FILE = DATA_DIR / "nodes_vpnbook.json"
 STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
+VPNBOOK_AUTH_FILE = DATA_DIR / "vpnbook_auth.txt"
 UPSTREAM_PROXY_AUTH_FILE = DATA_DIR / "upstream_proxy_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 
@@ -233,7 +239,8 @@ def load_ui_config() -> dict[str, Any]:
             "connection_enabled": True,
             "fixed_node_id": "",
             "favorite_node_ids": [],
-            "fav_fail_fallback": False
+            "fav_fail_fallback": False,
+            "node_provider": "vpngate"
         }
         updated = False
         if auth_file.exists():
@@ -241,7 +248,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "node_provider"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -290,6 +297,19 @@ try:
         UI_HOST = _init_cfg["host"]
 except Exception:
     pass
+
+def current_provider() -> str:
+    provider = str(load_ui_config().get("node_provider") or "vpngate").strip().lower()
+    return provider if provider in NODE_PROVIDERS else "vpngate"
+
+def nodes_file() -> Path:
+    # vpngate keeps the legacy nodes.json path so existing caches survive upgrades
+    return VPNBOOK_NODES_FILE if current_provider() == "vpnbook" else NODES_FILE
+
+def node_auth_file(node: dict[str, Any] | None) -> str | None:
+    if node and str(node.get("provider") or "") == "vpnbook":
+        return str(VPNBOOK_AUTH_FILE)
+    return None
 
 def get_session_token(password: str, username: str = "admin") -> str:
     salt = "aimilivpn_secure_salt_2026"
@@ -350,7 +370,7 @@ def set_state(**updates: Any) -> None:
     write_json(STATE_FILE, state)
 
 def read_nodes() -> list[dict[str, Any]]:
-    raw = read_json(NODES_FILE, [])
+    raw = read_json(nodes_file(), [])
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
@@ -362,7 +382,7 @@ def get_state() -> dict[str, Any]:
     state["active_openvpn_node_id"] = active_openvpn_node_id
     state["is_connecting"] = is_connecting
     state["maintenance_running"] = maintenance_lock.locked()
-    state.setdefault("api_url", API_URL)
+    state["api_url"] = VPNBOOK_URL if current_provider() == "vpnbook" else API_URL
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
@@ -386,7 +406,9 @@ def get_state() -> dict[str, Any]:
     state["fixed_node_id"] = ui_cfg.get("fixed_node_id", "")
     state["favorite_node_ids"] = ui_cfg.get("favorite_node_ids", [])
     state["fav_fail_fallback"] = False
-    
+    provider = str(ui_cfg.get("node_provider") or "vpngate").strip().lower()
+    state["node_provider"] = provider if provider in NODE_PROVIDERS else "vpngate"
+
     return state
 
 def safe_name(value: str) -> str:
@@ -402,7 +424,7 @@ def clear_active_connection_state(message: str) -> None:
         nodes = read_nodes()
         for item in nodes:
             item["active"] = False
-        write_json(NODES_FILE, nodes)
+        write_json(nodes_file(), nodes)
     set_state(
         active_openvpn_node_id="",
         is_connecting=False,
@@ -477,7 +499,7 @@ def read_socks5_connect_reply(sock: socket.socket) -> None:
 def format_host_port(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
 
-def fetch_api_text_via_proxy(url: str, ptype: str, phost: str, pport: int, use_ssl_verify: bool = True) -> str:
+def fetch_api_bytes_via_proxy(url: str, ptype: str, phost: str, pport: int, use_ssl_verify: bool = True) -> bytes:
     import socket
     import ssl
     import urllib.parse
@@ -631,17 +653,20 @@ def fetch_api_text_via_proxy(url: str, ptype: str, phost: str, pport: int, use_s
             idx += chunk_size + 2
         body_part = decoded
 
-    return body_part.decode('utf-8', errors='replace')
+    return body_part
 
-def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True) -> str:
+def fetch_api_text_via_proxy(url: str, ptype: str, phost: str, pport: int, use_ssl_verify: bool = True) -> str:
+    return fetch_api_bytes_via_proxy(url, ptype, phost, pport, use_ssl_verify).decode('utf-8', errors='replace')
+
+def fetch_api_bytes(url: str | None = None, use_ssl_verify: bool = True) -> bytes:
     if url is None:
         url = API_URL
-    
+
     ptype, phost, pport = vpn_utils.get_upstream_proxy()
     if ptype and phost and pport:
         try:
             print(f"[fetch_api_text] 监测到上游代理 ({ptype}://{phost}:{pport})，尝试通过代理获取 API...", flush=True)
-            return fetch_api_text_via_proxy(url, ptype, phost, pport, use_ssl_verify)
+            return fetch_api_bytes_via_proxy(url, ptype, phost, pport, use_ssl_verify)
         except Exception as e:
             print(f"[fetch_api_text] 通过代理获取 API 失败: {e}，尝试使用直连/默认系统代理...", flush=True)
             log_to_json("WARNING", "Main", f"使用代理 {ptype}://{phost}:{pport} 获取 API 失败: {e}")
@@ -657,10 +682,13 @@ def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True) -> str:
         import ssl
         ctx = ssl._create_unverified_context()
         with urllib.request.urlopen(request, timeout=12, context=ctx) as response:
-            return response.read().decode("utf-8", errors="replace")
+            return response.read()
     else:
         with urllib.request.urlopen(request, timeout=12) as response:
-            return response.read().decode("utf-8", errors="replace")
+            return response.read()
+
+def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True) -> str:
+    return fetch_api_bytes(url, use_ssl_verify).decode("utf-8", errors="replace")
 
 def parse_vpngate_rows(text: str) -> list[dict[str, str]]:
     lines = [line for line in text.splitlines() if line and not line.startswith("*")]
@@ -718,6 +746,7 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, vpn_utils.COUNTRY_TRANSLATIONS.get(country_long.strip(), country_long))
     return {
         "id": node_id,
+        "provider": "vpngate",
         "country": country_zh,
         "country_short": country_short,
         "host_name": row.get("HostName", ""),
@@ -745,6 +774,156 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     }
 
 def fetch_candidates() -> list[dict[str, Any]]:
+    if current_provider() == "vpnbook":
+        return fetch_vpnbook_candidates()
+    return fetch_vpngate_candidates()
+
+VPNBOOK_COUNTRY_BY_PREFIX = {
+    "us": ("US", "United States"),
+    "ca": ("CA", "Canada"),
+    "de": ("DE", "Germany"),
+    "fr": ("FR", "France"),
+    "pl": ("PL", "Poland"),
+    "uk": ("GB", "United Kingdom"),
+    "gb": ("GB", "United Kingdom"),
+}
+
+def parse_vpnbook_credentials(html: str) -> tuple[str, str]:
+    username_match = re.search(r"Username</label>.{0,400}?<code[^>]*>([^<]+)</code>", html, re.S)
+    password_match = re.search(r"Password</label>.{0,400}?<code[^>]*>([^<]+)</code>", html, re.S)
+    username = username_match.group(1).strip() if username_match else "vpnbook"
+    password = password_match.group(1).strip() if password_match else ""
+    if not password:
+        raise RuntimeError("无法从 VPNBook 页面解析连接密码（页面结构可能已变化）")
+    return username, password
+
+def parse_vpnbook_servers(html: str) -> list[str]:
+    hosts = sorted(set(re.findall(r"([a-z]{2}\d+\.vpnbook\.com)", html)))
+    return hosts
+
+def vpnbook_config_to_node(hostname: str, protocol: str, config_text: str) -> dict[str, Any] | None:
+    prefix = hostname[:2].lower()
+    country_short, country_long = VPNBOOK_COUNTRY_BY_PREFIX.get(prefix, ("", ""))
+    remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, hostname)
+    if not remote_host or not remote_port:
+        return None
+    node_id = safe_name("_".join(["vpnbook", hostname.split(".")[0], str(remote_port), proto]))
+    config_path = CONFIG_DIR / f"{node_id}.ovpn"
+    country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, country_long) or "未知"
+    return {
+        "id": node_id,
+        "provider": "vpnbook",
+        "country": country_zh,
+        "country_short": country_short,
+        "host_name": hostname,
+        "ip": "",
+        "score": 0,
+        "ping": 0,
+        "speed": 0,
+        "sessions": 0,
+        "owner": "",
+        "asn": "",
+        "as_name": "",
+        "location": "",
+        "ip_type": "",
+        "quality": "",
+        "latency_ms": 0,
+        "config_file": str(config_path),
+        "config_text": config_text,
+        "proto": proto,
+        "remote_host": remote_host,
+        "remote_port": remote_port,
+        "fetched_at": time.time(),
+        "probe_status": "not_checked",
+        "probe_message": "",
+        "probed_at": 0,
+    }
+
+def write_vpnbook_auth(username: str, password: str) -> None:
+    DATA_DIR.mkdir(exist_ok=True, parents=True)
+    VPNBOOK_AUTH_FILE.write_text(f"{username}\n{password}\n", encoding="utf-8")
+    try:
+        VPNBOOK_AUTH_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+def fetch_vpnbook_candidates() -> list[dict[str, Any]]:
+    blacklist = load_blacklist()
+    log_to_json("INFO", "Main", "开始拉取 VPNBook 免费节点列表...")
+    html = ""
+    last_err: Exception | None = None
+    for verify_ssl in (True, False):
+        try:
+            print(f"[fetch_vpnbook] 尝试拉取 {VPNBOOK_URL} (SSL验证: {verify_ssl})...", flush=True)
+            html = fetch_api_text(VPNBOOK_URL, verify_ssl)
+            if html:
+                break
+        except Exception as exc:
+            last_err = exc
+            print(f"[fetch_vpnbook] 拉取页面失败 (验证: {verify_ssl}): {exc}", flush=True)
+            log_to_json("WARNING", "Main", f"拉取 VPNBook 页面失败 (验证: {verify_ssl}): {exc}")
+    if not html:
+        msg = f"获取 VPNBook 页面失败: {last_err}"
+        set_state(last_fetch_status="error", last_fetch_message=msg)
+        log_to_json("ERROR", "Main", msg)
+        raise RuntimeError(msg) from last_err
+
+    username, password = parse_vpnbook_credentials(html)
+    write_vpnbook_auth(username, password)
+    print(f"[fetch_vpnbook] 已更新 VPNBook 连接凭据 (用户名: {username})", flush=True)
+
+    servers = parse_vpnbook_servers(html)
+    if not servers:
+        msg = "VPNBook 页面中未找到任何 OpenVPN 服务器（页面结构可能已变化）"
+        set_state(last_fetch_status="error", last_fetch_message=msg)
+        log_to_json("ERROR", "Main", msg)
+        raise RuntimeError(msg)
+    print(f"[fetch_vpnbook] 解析到 {len(servers)} 台服务器: {', '.join(servers)}", flush=True)
+
+    def download_config(target: tuple[str, str]) -> dict[str, Any] | None:
+        hostname, protocol = target
+        query = urllib.parse.urlencode({"hostname": hostname, "protocol": protocol})
+        url = f"{VPNBOOK_CONFIG_API}?{query}"
+        for verify_ssl in (True, False):
+            try:
+                config_text = fetch_api_text(url, verify_ssl)
+                if "remote " in config_text:
+                    return vpnbook_config_to_node(hostname, protocol, config_text)
+                return None
+            except Exception as exc:
+                print(f"[fetch_vpnbook] 下载配置失败 {hostname}/{protocol} (验证: {verify_ssl}): {exc}", flush=True)
+        return None
+
+    targets = [(hostname, protocol) for hostname in servers for protocol in VPNBOOK_PROTOCOLS]
+    candidates: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    now = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for node in pool.map(download_config, targets):
+            if node is None or node["id"] in seen_ids:
+                continue
+            entry = blacklist.get(node["id"])
+            if entry and float(entry.get("until", 0) or 0) > now:
+                continue
+            candidates.append(node)
+            seen_ids.add(node["id"])
+
+    if not candidates:
+        msg = "VPNBook 没有下载到任何可用的 OpenVPN 配置"
+        set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=msg)
+        log_to_json("ERROR", "Main", msg)
+        raise RuntimeError(msg)
+
+    set_state(
+        last_fetch_at=time.time(),
+        last_fetch_status="ok",
+        last_fetch_message=f"Fetched {len(candidates)} VPNBook nodes from {len(servers)} servers.",
+        blacklisted_nodes=len(blacklist),
+    )
+    log_to_json("INFO", "Main", f"成功获取 VPNBook 节点，共 {len(candidates)} 个候选节点")
+    return candidates
+
+def fetch_vpngate_candidates() -> list[dict[str, Any]]:
     blacklist = load_blacklist()
     candidates: list[dict[str, Any]] = []
     seen_ips = set()
@@ -853,7 +1032,7 @@ def get_openvpn_version() -> float:
     _openvpn_version = 2.4
     return _openvpn_version
 
-def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> list[str]:
+def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0", auth_file: str | None = None) -> list[str]:
     command = split_openvpn_command()
     command.extend(
         [
@@ -876,7 +1055,7 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
             "--connect-timeout",
             "15",
             "--auth-user-pass",
-            str(AUTH_FILE),
+            auth_file or str(AUTH_FILE),
             "--auth-nocache",
         ]
     )
@@ -896,15 +1075,15 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
         content = Path(config_file).read_text(encoding="utf-8", errors="replace")
         if vpn_utils.is_config_tcp(content):
             ptype, host, port = vpn_utils.get_upstream_proxy()
-            auth_file = upstream_proxy_auth_file()
+            proxy_auth = upstream_proxy_auth_file()
             if ptype == "socks" and host and port:
                 command.extend(["--socks-proxy", host, str(port)])
-                if auth_file:
-                    command.append(auth_file)
+                if proxy_auth:
+                    command.append(proxy_auth)
             elif ptype == "http" and host and port:
                 command.extend(["--http-proxy", host, str(port)])
-                if auth_file:
-                    command.append(auth_file)
+                if proxy_auth:
+                    command.append(proxy_auth)
     except Exception:
         pass
         
@@ -929,6 +1108,7 @@ def kill_existing_openvpn_processes() -> None:
             str(DATA_DIR),
             str(CONFIG_DIR),
             str(AUTH_FILE),
+            str(VPNBOOK_AUTH_FILE),
             str(UPSTREAM_PROXY_AUTH_FILE),
         ]
         killed_pids: list[int] = []
@@ -996,11 +1176,11 @@ def update_handshake_status(line_lower: str) -> None:
             set_state(active_node_latency=short_status, last_check_message=detailed_desc)
             break
 
-def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bool, timeout: int | None = None, dev: str = "tun0") -> tuple[bool, str, subprocess.Popen[str] | None]:
+def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bool, timeout: int | None = None, dev: str = "tun0", auth_file: str | None = None) -> tuple[bool, str, subprocess.Popen[str] | None]:
     limit = timeout if timeout is not None else OPENVPN_TEST_TIMEOUT_SECONDS
     try:
         process = subprocess.Popen(
-            openvpn_command(config_file, route_nopull, dev),
+            openvpn_command(config_file, route_nopull, dev, auth_file),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1280,7 +1460,7 @@ def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str =
             nodes = read_nodes()
             for item in nodes:
                 item["active"] = False
-            write_json(NODES_FILE, nodes)
+            write_json(nodes_file(), nodes)
         set_state(
             active_openvpn_node_id="",
             active_node_latency="无活动连接",
@@ -1360,7 +1540,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     idx = None
     try:
         idx = get_free_test_index()
-        ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
+        ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}", auth_file=node_auth_file(node))
     finally:
         if idx is not None:
             release_test_index(idx)
@@ -1402,7 +1582,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
                 node["quality"] = temp_node["quality"]
             
             sorted_nodes = sort_all_nodes(nodes)
-            write_json(NODES_FILE, sorted_nodes)
+            write_json(nodes_file(), sorted_nodes)
             res = next((item for item in sorted_nodes if item.get("id") == node_id), node)
             return res
         else:
@@ -1418,7 +1598,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                 n["probe_status"] = "testing"
                 n["probe_message"] = "正在检测节点连通性..."
                 n["probed_at"] = now
-        write_json(NODES_FILE, sort_all_nodes(nodes))
+        write_json(nodes_file(), sort_all_nodes(nodes))
         
     def test_worker(args: tuple[int, dict[str, Any]]) -> dict[str, Any]:
         idx, n_info = args
@@ -1452,7 +1632,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         try:
             tun_idx = get_free_test_index()
             dev_name = f"tun{tun_idx}"
-            ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
+            ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=dev_name, auth_file=node_auth_file(n_info))
         finally:
             if tun_idx is not None:
                 release_test_index(tun_idx)
@@ -1502,7 +1682,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                     if n.get("id") == nid:
                         n.update(updated_nodes_map[nid])
                         break
-                write_json(NODES_FILE, sort_all_nodes(current_nodes))
+                write_json(nodes_file(), sort_all_nodes(current_nodes))
                 
     # 批量查询并丰富可用节点的地理及 ISP 信息，防止并发时被定位 API 接口限流
     successful_nodes = [res for res in updated_nodes_map.values() if res.get("probe_status") == "available"]
@@ -1519,7 +1699,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             if nid in updated_nodes_map:
                 n.update(updated_nodes_map[nid])
         sorted_nodes = sort_all_nodes(current_nodes)
-        write_json(NODES_FILE, sorted_nodes)
+        write_json(nodes_file(), sorted_nodes)
         
     return list(updated_nodes_map.values())
 
@@ -1576,7 +1756,7 @@ def auto_switch_node(attempt: int = 0) -> None:
             nodes = read_nodes()
             for item in nodes:
                 item["active"] = False
-            write_json(NODES_FILE, nodes)
+            write_json(nodes_file(), nodes)
         set_state(active_openvpn_node_id="", last_check_message=msg)
         
         def bg_fetch_and_switch():
@@ -1634,7 +1814,7 @@ def connect_node(node_id: str) -> str:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
         set_state(active_node_latency="启动核心", last_check_message="正在启动 OpenVPN Core 核心服务并建立连接...")
-        ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True)
+        ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True, auth_file=node_auth_file(node))
         if not ok or process is None:
             try:
                 if config_path.exists():
@@ -1645,7 +1825,7 @@ def connect_node(node_id: str) -> str:
             node["probe_message"] = message
             for item in nodes:
                 item["active"] = False
-            write_json(NODES_FILE, nodes)
+            write_json(nodes_file(), nodes)
             log_to_json("ERROR", "VPN", f"连接节点 {node_id} 失败: {message}")
             print(f"[连接核心失败] 无法与 VPN 节点 {node_id} 建立隧道连接！详情: {message}", flush=True)
             set_state(active_openvpn_node_id="", is_connecting=False, active_node_latency="无活动连接", last_check_message=f"连接失败: {message}")
@@ -1680,7 +1860,7 @@ def connect_node(node_id: str) -> str:
             if item["active"]:
                 _ph = f"[{LOCAL_PROXY_HOST}]" if ":" in LOCAL_PROXY_HOST else LOCAL_PROXY_HOST
                 item["probe_message"] = f"Active node. HTTP proxy: http://{_ph}:{LOCAL_PROXY_PORT}"
-        write_json(NODES_FILE, nodes)
+        write_json(nodes_file(), nodes)
         
         set_state(last_check_message="正在测试本地代理出站联通性与出口 IP...")
         res = check_proxy_health()
@@ -1758,7 +1938,8 @@ def maintain_valid_nodes(force: bool = False) -> str:
             vpn_utils.check_and_fix_dns()
             diag_msg = str(exc)
             if not any(token in diag_msg for token in ["[ERR_", "错误代码"]):
-                err_code, raw_diag = vpn_utils.diagnose_api_failure(API_URL)
+                diag_url = VPNBOOK_URL if current_provider() == "vpnbook" else API_URL
+                err_code, raw_diag = vpn_utils.diagnose_api_failure(diag_url)
                 diag_msg = f"[错误代码 {err_code}] 获取节点失败: {exc} | 诊断结果: {raw_diag}"
             set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=diag_msg)
             candidates = []
@@ -1816,7 +1997,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     except Exception:
                         pass
                         
-            write_json(NODES_FILE, merged)
+            write_json(nodes_file(), merged)
 
         initial_tested_ids: set[str] = set()
         ui_cfg = load_ui_config()
@@ -3364,6 +3545,22 @@ INDEX_HTML = r"""<!doctype html>
           <input type="number" id="net_proxy_port" class="input-field" required min="1024" max="65535" placeholder="7928">
         </div>
 
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label class="form-label">免费节点来源</label>
+          <input type="hidden" id="net_node_provider" value="vpngate">
+          <div class="option-group" id="node_provider_group">
+            <div class="option-card active" data-value="vpngate" onclick="setNodeProvider('vpngate')">
+              <div class="option-card-title">VPN Gate</div>
+              <div class="option-card-desc">节点多，志愿者提供</div>
+            </div>
+            <div class="option-card" data-value="vpnbook" onclick="setNodeProvider('vpnbook')">
+              <div class="option-card-title">VPNBook</div>
+              <div class="option-card-desc">节点少，官方免费服务器</div>
+            </div>
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">切换来源后将断开当前连接并重新拉取节点列表。</div>
+        </div>
+
         <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 16px; margin-bottom: 16px;">
           <div class="form-group" style="margin-bottom: 16px;">
             <label class="form-label">IP 出站路由模式</label>
@@ -4340,7 +4537,7 @@ function selectOptionCard(groupName, value) {
   } else if (groupName === 'routing_ip_type') {
     const input = $("net_routing_ip_type");
     if (input) input.value = value;
-    
+
     const cards = document.querySelectorAll("#routing_ip_type_group .option-card");
     cards.forEach(card => {
       if (card.getAttribute("data-value") === value) {
@@ -4349,7 +4546,23 @@ function selectOptionCard(groupName, value) {
         card.classList.remove("active");
       }
     });
+  } else if (groupName === 'node_provider') {
+    const input = $("net_node_provider");
+    if (input) input.value = value;
+
+    const cards = document.querySelectorAll("#node_provider_group .option-card");
+    cards.forEach(card => {
+      if (card.getAttribute("data-value") === value) {
+        card.classList.add("active");
+      } else {
+        card.classList.remove("active");
+      }
+    });
   }
+}
+
+function setNodeProvider(value) {
+  selectOptionCard('node_provider', value);
 }
 
 function setRoutingMode(value) {
@@ -4534,9 +4747,11 @@ function openNetworkModal() {
     $("net_proxy_port").value = state.proxy_port || 7928;
     const mode = state.routing_mode || "auto";
     const ipType = state.routing_ip_type || "all";
-    
+    const provider = state.node_provider || "vpngate";
+
     selectOptionCard('routing_mode', mode);
     selectOptionCard('routing_ip_type', ipType);
+    selectOptionCard('node_provider', provider);
   }
   
   populateRoutingCountries();
@@ -4561,7 +4776,8 @@ async function saveNetwork(e) {
   const routingMode = $("net_routing_mode").value;
   const forceCountry = $("net_force_country").value;
   const routingIpType = $("net_routing_ip_type").value;
-  
+  const nodeProvider = $("net_node_provider").value || "vpngate";
+
   if (isNaN(proxyPort) || proxyPort < 1024 || proxyPort > 65535) {
     errorDivEl.textContent = "代理出站端口范围必须在 1024 至 65535 之间";
     errorDivEl.style.display = "block";
@@ -4596,7 +4812,8 @@ async function saveNetwork(e) {
         proxy_port: proxyPort,
         routing_mode: routingMode,
         force_country: forceCountry,
-        routing_ip_type: routingIpType
+        routing_ip_type: routingIpType,
+        node_provider: nodeProvider
       })
     });
     
@@ -5020,7 +5237,7 @@ def background_proxy_checker() -> None:
                             if active_node:
                                 mark_blacklisted(active_node, f"代理连通性检测失败: {error_msg}")
                                 active_node["probe_status"] = "unavailable"
-                                write_json(NODES_FILE, nodes)
+                                write_json(nodes_file(), nodes)
                         auto_switch_node()
                     else:
                         print(f"[代理守护线程] 固定 IP 模式下代理不可用，正在尝试重启连接同一节点: {active_openvpn_node_id}", flush=True)
@@ -5455,7 +5672,8 @@ class Handler(BaseHTTPRequestHandler):
                 routing_mode = str(payload.get("routing_mode") or "auto").strip()
                 force_country = str(payload.get("force_country") or "").strip()
                 routing_ip_type = str(payload.get("routing_ip_type") or "all").strip()
-                
+                node_provider = str(payload.get("node_provider") or "vpngate").strip().lower()
+
                 try:
                     new_proxy_port_int = int(new_proxy_port)
                     if not (1024 <= new_proxy_port_int <= 65535):
@@ -5473,34 +5691,59 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_ip_type not in ("all", "residential", "hosting"):
                     self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
                     return
-                
+                if node_provider not in NODE_PROVIDERS:
+                    self.send_json({"ok": False, "error": "无效的节点来源"}, HTTPStatus.BAD_REQUEST)
+                    return
+
                 ui_cfg = load_ui_config()
                 expected_proxy_port = ui_cfg.get("proxy_port", 7928)
+                previous_provider = str(ui_cfg.get("node_provider") or "vpngate").strip().lower()
+                provider_changed = node_provider != previous_provider
+                if provider_changed and routing_mode == "fixed_ip":
+                    # Fixed-IP mode pins a node id from the old provider's list; force auto instead
+                    routing_mode = "auto"
                 fixed_node_id = current_fixed_node_id(ui_cfg) if routing_mode == "fixed_ip" else ""
-                
+
                 if new_proxy_port_int == ui_cfg.get("port", 8787):
                     self.send_json({"ok": False, "error": "代理出站端口不能与网页管理端口相同"}, HTTPStatus.BAD_REQUEST)
                     return
                 if routing_mode == "fixed_ip" and not fixed_node_id:
                     self.send_json({"ok": False, "error": "启用固定 IP 前，请先连接一个要锁定的节点"}, HTTPStatus.BAD_REQUEST)
                     return
-                
+
                 ui_cfg["proxy_port"] = new_proxy_port_int
                 ui_cfg["routing_mode"] = routing_mode
                 ui_cfg["force_country"] = force_country
                 ui_cfg["routing_ip_type"] = routing_ip_type
+                ui_cfg["node_provider"] = node_provider
+                if provider_changed:
+                    ui_cfg["fixed_node_id"] = ""
                 if routing_mode == "favorites":
                     ui_cfg["fav_fail_fallback"] = False
                 if routing_mode == "fixed_ip":
                     ui_cfg["fixed_node_id"] = fixed_node_id
-                
+
                 auth_file = DATA_DIR / "ui_auth.json"
                 with lock:
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
                     write_json(auth_file, ui_cfg)
 
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "路由设置已更新")
-                
+
+                if provider_changed:
+                    old_file = VPNBOOK_NODES_FILE if previous_provider == "vpnbook" else NODES_FILE
+                    with lock:
+                        old_nodes = read_json(old_file, [])
+                        if isinstance(old_nodes, list):
+                            for item in old_nodes:
+                                if isinstance(item, dict):
+                                    item["active"] = False
+                            write_json(old_file, old_nodes)
+                    clear_active_connection_state(f"节点来源已切换为 {node_provider}，正在重新获取节点...")
+                    if not maintenance_lock.locked():
+                        threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
+                    policy_message = f"节点来源已切换为 {node_provider}，已在后台重新拉取节点列表"
+
                 restart_needed = (new_proxy_port_int != expected_proxy_port)
                 if restart_needed:
                     self.send_json({"ok": True, "restart_needed": True, "message": "配置更新成功，代理出站端口变更，将在 2 秒内重启..."})
@@ -5655,7 +5898,7 @@ class Handler(BaseHTTPRequestHandler):
                     nodes = read_nodes()
                     for item in nodes:
                         item["active"] = False
-                    write_json(NODES_FILE, nodes)
+                    write_json(nodes_file(), nodes)
                 global last_active_ping_time, last_active_latency
                 last_active_ping_time = 0.0
                 last_active_latency = 0

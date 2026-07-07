@@ -70,12 +70,17 @@ def load_state():
 
 def get_active_node_info():
     import json
-    path = "/opt/aimilivpn/vpngate_data/nodes.json"
+    paths = [
+        "/opt/aimilivpn/vpngate_data/nodes.json",
+        "/opt/aimilivpn/vpngate_data/nodes_vpnbook.json",
+    ]
     state = load_state()
     active_id = state.get("active_openvpn_node_id")
     if not active_id:
         return None, None
-    if os.path.exists(path):
+    for path in paths:
+        if not os.path.exists(path):
+            continue
         try:
             with open(path, "r", encoding="utf-8") as f:
                 nodes = json.load(f)
