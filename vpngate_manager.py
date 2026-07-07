@@ -1089,6 +1089,12 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0", aut
         
     if route_nopull:
         command.append("--route-nopull")
+        # --route-nopull only blocks server-pushed routes; directives written in the
+        # .ovpn file itself (e.g. VPNBook's local "redirect-gateway") still execute
+        # and would hijack the host's default route. --route-noexec stops OpenVPN
+        # from installing any routes at all — egress is handled by policy routing
+        # (table 100), so no OpenVPN-managed routes are needed.
+        command.append("--route-noexec")
     return command
 
 def stop_process(process: subprocess.Popen[str] | None) -> None:
