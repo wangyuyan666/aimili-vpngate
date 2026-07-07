@@ -1057,6 +1057,11 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0", aut
             "--auth-user-pass",
             auth_file or str(AUTH_FILE),
             "--auth-nocache",
+            # Provider .ovpn files are semi-trusted input; forbid user-defined
+            # up/down scripts even if the config sets script-security itself
+            # (CLI options come after --config, so this value wins).
+            "--script-security",
+            "1",
         ]
     )
     
