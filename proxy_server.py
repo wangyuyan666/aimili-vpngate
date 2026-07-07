@@ -37,30 +37,43 @@ def random_alnum(length: int) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
-def load_or_create_local_proxy_credentials() -> tuple[str, str]:
-    auth_file = local_proxy_auth_file()
-    try:
-        if auth_file.exists():
-            data = json.loads(auth_file.read_text(encoding="utf-8"))
-            username = str(data.get("username") or "")
-            password = str(data.get("password") or "")
-            if username and password:
-                return username, password
-    except Exception:
-        pass
+_local_proxy_credentials: tuple[str, str] | None = None
+_local_proxy_credentials_lock = threading.Lock()
 
-    username = "proxy" + random_alnum(6)
-    password = random_alnum(20)
-    try:
-        auth_file.parent.mkdir(parents=True, exist_ok=True)
-        auth_file.write_text(
-            json.dumps({"username": username, "password": password}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.chmod(auth_file, 0o600)
-    except Exception:
-        pass
-    return username, password
+def load_or_create_local_proxy_credentials() -> tuple[str, str]:
+    # Cached for the process lifetime: keeps credentials stable even if the
+    # auth file becomes unreadable/unwritable later, and avoids per-connection
+    # disk reads (this runs on every auth check).
+    global _local_proxy_credentials
+    with _local_proxy_credentials_lock:
+        if _local_proxy_credentials is not None:
+            return _local_proxy_credentials
+
+        auth_file = local_proxy_auth_file()
+        try:
+            if auth_file.exists():
+                data = json.loads(auth_file.read_text(encoding="utf-8"))
+                username = str(data.get("username") or "")
+                password = str(data.get("password") or "")
+                if username and password:
+                    _local_proxy_credentials = (username, password)
+                    return _local_proxy_credentials
+        except Exception as e:
+            print(f"[警告] 读取代理凭据文件失败 ({auth_file}): {e}", flush=True)
+
+        username = "proxy" + random_alnum(6)
+        password = random_alnum(20)
+        try:
+            auth_file.parent.mkdir(parents=True, exist_ok=True)
+            auth_file.write_text(
+                json.dumps({"username": username, "password": password}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.chmod(auth_file, 0o600)
+        except Exception as e:
+            print(f"[警告] 写入代理凭据文件失败 ({auth_file}): {e}；本次生成的凭据仅在进程存续期间有效。", flush=True)
+        _local_proxy_credentials = (username, password)
+        return _local_proxy_credentials
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     data = b""
@@ -87,10 +100,17 @@ def parse_host_port(authority: str, default_port: int) -> tuple[str, int]:
     return authority, default_port
 
 def get_proxy_credentials() -> tuple[str | None, str | None]:
-    user = os.environ.get("LOCAL_PROXY_USER") or os.environ.get("LOCAL_PROXY_USERNAME")
-    password = os.environ.get("LOCAL_PROXY_PASS") or os.environ.get("LOCAL_PROXY_PASSWORD")
+    user = os.environ.get("LOCAL_PROXY_USER")
+    if user is None:
+        user = os.environ.get("LOCAL_PROXY_USERNAME")
+    password = os.environ.get("LOCAL_PROXY_PASS")
+    if password is None:
+        password = os.environ.get("LOCAL_PROXY_PASSWORD")
     if user is None and password is None:
         return load_or_create_local_proxy_credentials()
+    if not user and not password:
+        # Both explicitly set to empty: auth disabled on purpose.
+        return None, None
     return user or "", password or ""
 
 def proxy_auth_enabled() -> bool:
@@ -459,8 +479,11 @@ def start_proxy_server(host: str, port: int) -> None:
         print(f"HTTP/SOCKS5 proxy listening on {host}:{port}", flush=True)
         auth_user, auth_pass = get_proxy_credentials()
         if auth_user is not None and auth_pass is not None:
+            # Never log the password: service logs are readable via `ml logs` /
+            # journalctl. Credentials live in /etc/default/aimilivpn or
+            # vpngate_data/local_proxy_auth.json; `ml status` shows them masked.
             print(
-                f"HTTP/SOCKS5 proxy auth enabled: user={auth_user}, password={auth_pass}",
+                f"HTTP/SOCKS5 proxy auth enabled: user={auth_user} (password hidden; run `ml status` to view)",
                 flush=True,
             )
         warn_if_publicly_exposed(host, port)

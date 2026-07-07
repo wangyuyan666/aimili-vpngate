@@ -157,8 +157,9 @@ def get_public_ip():
         except Exception:
             pass
     import urllib.request
-    # Try dual-stack first, then IPv6-only, then IPv4-only
-    for api_url in ["https://api64.ipify.org", "https://api6.ipify.org", "https://api.ipify.org"]:
+    # IPv4 first: the proxy listens on 0.0.0.0 (IPv4 only), so an IPv6 answer
+    # would point at an unreachable address. Dual-stack / IPv6 as fallback.
+    for api_url in ["https://api.ipify.org", "https://api64.ipify.org", "https://api6.ipify.org"]:
         try:
             req = urllib.request.Request(api_url, headers={"User-Agent": "curl/7.68.0"})
             with urllib.request.urlopen(req, timeout=2) as r:
@@ -360,6 +361,10 @@ def print_status():
         proxy_addr = "127.0.0.1"
     elif proxy_host == "0.0.0.0":
         proxy_addr = get_public_ip()
+        # Cached public_ip.txt may hold an IPv6 literal (older installs):
+        # bracket it so the printed URL stays parseable.
+        if ":" in proxy_addr:
+            proxy_addr = f"[{proxy_addr}]"
     elif ":" in proxy_host:
         proxy_addr = f"[{proxy_host}]"
     else:

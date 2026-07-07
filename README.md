@@ -78,7 +78,7 @@ AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCK
 * **⚙️ 本地其他服务配置**:
   将本机或外部设备的代理工具、爬虫框架或服务的出站代理设置为 `http://代理账号:代理密码@服务器公网IP:7928`，SOCKS5 客户端则使用 `socks5://代理账号:代理密码@服务器公网IP:7928`。
 
-> 💡 **小贴士**：代理监听与鉴权配置保存在 `/etc/default/aimilivpn`，修改 `LOCAL_PROXY_HOST`、`LOCAL_PROXY_USER`、`LOCAL_PROXY_PASS` 后重启服务即可生效。
+> 💡 **小贴士**：代理监听与鉴权配置保存在 `/etc/default/aimilivpn`，修改 `LOCAL_PROXY_HOST`、`LOCAL_PROXY_USER`、`LOCAL_PROXY_PASS` 后重启服务即可生效。若确需关闭鉴权（不推荐），请将 `LOCAL_PROXY_USER` 与 `LOCAL_PROXY_PASS` 同时设为空值（`LOCAL_PROXY_USER=` / `LOCAL_PROXY_PASS=`），并建议同时把 `LOCAL_PROXY_HOST` 改回 `127.0.0.1`。
 
 ---
 
@@ -200,7 +200,7 @@ The built-in HTTP/SOCKS5 proxy server (default port **`7928`**) binds to **`0.0.
 * **⚙️ Other local services**:
   Configure scrapers, frameworks, or utility tools to use `http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928`; SOCKS5 clients can use `socks5://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928`.
 
-> 💡 **Quick Note**: Proxy listener and authentication settings are stored in `/etc/default/aimilivpn`; edit `LOCAL_PROXY_HOST`, `LOCAL_PROXY_USER`, or `LOCAL_PROXY_PASS`, then restart the service.
+> 💡 **Quick Note**: Proxy listener and authentication settings are stored in `/etc/default/aimilivpn`; edit `LOCAL_PROXY_HOST`, `LOCAL_PROXY_USER`, or `LOCAL_PROXY_PASS`, then restart the service. To disable authentication (not recommended), set both `LOCAL_PROXY_USER=` and `LOCAL_PROXY_PASS=` to empty values — and preferably switch `LOCAL_PROXY_HOST` back to `127.0.0.1`.
 
 ---
 

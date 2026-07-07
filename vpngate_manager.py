@@ -3855,7 +3855,10 @@ function render(){
   
   const statusMessage = state.last_check_message || "";
   const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${activeNode.id})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
-  const localProxy = state.local_proxy || `http://0.0.0.0:${state.proxy_port || 7928}`;
+  // Wildcard binds are not connectable addresses; show the host the browser
+  // reached this panel through instead (location.hostname keeps IPv6 brackets).
+  const localProxyRaw = state.local_proxy || `http://0.0.0.0:${state.proxy_port || 7928}`;
+  const localProxy = localProxyRaw.replace("://0.0.0.0", `://${location.hostname}`).replace("://[::]", `://${location.hostname}`);
   if ($("status")) { $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：${localProxy} | 活动节点：${activeNodeInfo} | 状态：${statusMessage}`; }
   
   // Update proxy test status card based on background checks

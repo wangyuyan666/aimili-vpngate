@@ -353,11 +353,14 @@ fi
 chmod 600 "$AUTH_FILE" 2>/dev/null || true
 
 # 7.5 Configure public proxy listener and mandatory proxy credentials.
-# Existing LOCAL_PROXY_USER / LOCAL_PROXY_PASS are preserved; listener host is forced
-# to 0.0.0.0 so external clients can reach the HTTP/SOCKS5 proxy through the VPS IP.
-python3 - "$PROXY_ENV_FILE" "$AUTH_FILE" <<'PY'
+# Existing LOCAL_PROXY_USER / LOCAL_PROXY_PASS are preserved (env file first, then
+# the runtime-generated local_proxy_auth.json so upgrades don't rotate credentials);
+# listener host is forced to 0.0.0.0 so external clients can reach the proxy.
+# NOTE: keep this heredoc Python 3.8 compatible (no dict[...] annotations).
+python3 - "$PROXY_ENV_FILE" "$AUTH_FILE" "${INSTALL_DIR}/vpngate_data/local_proxy_auth.json" <<'PY'
 import json
 import os
+import re
 import secrets
 import string
 import sys
@@ -365,9 +368,10 @@ from pathlib import Path
 
 env_file = Path(sys.argv[1])
 auth_file = Path(sys.argv[2])
+proxy_auth_json = Path(sys.argv[3])
 
-def parse_env(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
+def parse_env(path):
+    result = {}
     if not path.exists():
         return result
     for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -378,13 +382,26 @@ def parse_env(path: Path) -> dict[str, str]:
         key = key.strip()
         value = value.strip()
         if (len(value) >= 2) and value[0] == value[-1] and value[0] in ("'", '"'):
+            quote = value[0]
             value = value[1:-1]
+            if quote == '"':
+                # Undo quote_env escaping so values round-trip across reruns.
+                value = re.sub(r"\\(.)", r"\1", value)
         result[key] = value
     return result
 
-def random_alnum(length: int) -> str:
+def random_alnum(length):
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+def quote_env(value):
+    # Single quotes: literal for both shell sourcing (OpenRC) and systemd
+    # EnvironmentFile. Values containing a single quote fall back to double
+    # quotes with best-effort escaping (systemd does not expand $ anyway).
+    if "'" not in value:
+        return "'" + value + "'"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return '"' + escaped + '"'
 
 env = parse_env(env_file)
 proxy_port = "7928"
@@ -394,16 +411,33 @@ try:
 except Exception:
     pass
 
-proxy_user = env.get("LOCAL_PROXY_USER") or env.get("LOCAL_PROXY_USERNAME") or ("proxy" + random_alnum(6))
-proxy_pass = env.get("LOCAL_PROXY_PASS") or env.get("LOCAL_PROXY_PASSWORD") or random_alnum(20)
+json_user = ""
+json_pass = ""
+try:
+    if proxy_auth_json.exists():
+        data = json.loads(proxy_auth_json.read_text(encoding="utf-8"))
+        json_user = str(data.get("username") or "")
+        json_pass = str(data.get("password") or "")
+except Exception:
+    pass
+
+proxy_user = (
+    env.get("LOCAL_PROXY_USER") or env.get("LOCAL_PROXY_USERNAME")
+    or json_user or ("proxy" + random_alnum(6))
+)
+proxy_pass = (
+    env.get("LOCAL_PROXY_PASS") or env.get("LOCAL_PROXY_PASSWORD")
+    or json_pass or random_alnum(20)
+)
 
 content = "\n".join([
     "# AimiliVPN runtime environment",
     "# HTTP/SOCKS5 proxy listens on all IPv4 interfaces and requires authentication.",
+    "# Set LOCAL_PROXY_USER and LOCAL_PROXY_PASS both to empty values to disable auth (not recommended).",
     "LOCAL_PROXY_HOST=0.0.0.0",
-    f"LOCAL_PROXY_PORT={proxy_port}",
-    f"LOCAL_PROXY_USER={proxy_user}",
-    f"LOCAL_PROXY_PASS={proxy_pass}",
+    "LOCAL_PROXY_PORT=" + proxy_port,
+    "LOCAL_PROXY_USER=" + quote_env(proxy_user),
+    "LOCAL_PROXY_PASS=" + quote_env(proxy_pass),
     "",
 ])
 env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -546,7 +580,9 @@ fi
 
 # Get VPS public IP
 echo -e "正在获取 VPS 公网 IP..."
-PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org || curl -s --max-time 3 https://ifconfig.me || curl -s --max-time 3 https://icanhazip.com || echo "您的服务器公网IP")
+# Force IPv4: the proxy listens on 0.0.0.0 (IPv4 only) and unbracketed IPv6
+# literals would produce invalid proxy URLs below. Dual-stack as last resort.
+PUBLIC_IP=$(curl -4 -s --max-time 3 https://api.ipify.org || curl -4 -s --max-time 3 https://ifconfig.me || curl -4 -s --max-time 3 https://icanhazip.com || curl -s --max-time 3 https://api64.ipify.org || echo "您的服务器公网IP")
 echo -n "$PUBLIC_IP" > "${INSTALL_DIR}/vpngate_data/public_ip.txt"
 
 # Get VPS public IPv6
