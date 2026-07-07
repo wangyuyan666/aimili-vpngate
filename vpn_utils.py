@@ -349,13 +349,25 @@ def check_and_fix_dns() -> None:
         return
 
     resolv_file = Path("/etc/resolv.conf")
+    if resolv_file.is_symlink():
+        # Managed by systemd-resolved / NetworkManager / netplan: appending would be
+        # overwritten or corrupt the manager's state. Leave it alone and just advise.
+        print("[dns_heal] 域名解析失败，但 /etc/resolv.conf 由系统服务托管 (符号链接)，不做修改。"
+              "请使用 resolvectl 或网络管理工具将 DNS 设置为 1.1.1.1 / 8.8.8.8。", flush=True)
+        return
     if resolv_file.exists():
         try:
             content = resolv_file.read_text(encoding="utf-8", errors="replace")
             if "nameserver 1.1.1.1" not in content and "nameserver 8.8.8.8" not in content:
                 print("[dns_heal] Resolving names failed, but IP network is OK. Appending public DNS to /etc/resolv.conf...", flush=True)
+                # Marker block lets `ml uninstall` remove exactly what we added
                 with open("/etc/resolv.conf", "a", encoding="utf-8") as f:
-                    f.write("\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+                    f.write(
+                        "\n# aimilivpn-dns-fallback-begin\n"
+                        "nameserver 1.1.1.1\n"
+                        "nameserver 8.8.8.8\n"
+                        "# aimilivpn-dns-fallback-end\n"
+                    )
         except Exception as e:
             print(f"[dns_heal] Failed to write DNS fallback: {e}", flush=True)
 
@@ -681,13 +693,22 @@ def diagnose_local_obstructions(proxy_port: int = 7928, host: str = "127.0.0.1")
             pass
 
         # 4. 检查系统反向路径过滤 (rp_filter) 设置
-        rp_all_path = Path("/proc/sys/net/ipv4/conf/all/rp_filter")
-        if rp_all_path.exists():
+        # 内核对每个接口取 max(conf/all, conf/<iface>)，数值 2(宽松) > 1(严格) > 0(关闭)，
+        # 因此只要 tun0 (或新接口继承的 default) 为 2，即便 all=1 依然是宽松模式。
+        def read_rp(name: str) -> int | None:
+            p = Path(f"/proc/sys/net/ipv4/conf/{name}/rp_filter")
             try:
-                val = rp_all_path.read_text(encoding="utf-8").strip()
-                if val == "1":
-                    return 3008, "[ERR_ROUTE_RP_FILTER_STRICT] 系统启用了严格的反向路径过滤(rp_filter=1)。原因: 在启用策略路由时，严格的路径过滤会导致通过虚拟网卡 tun0 的回包被内核静默丢弃，导致连接超时。请将 net.ipv4.conf.all.rp_filter 设置为 2 或 0。"
+                return int(p.read_text(encoding="utf-8").strip())
             except Exception:
-                pass
+                return None
+
+        rp_all = read_rp("all")
+        rp_iface = read_rp("tun0")
+        if rp_iface is None:
+            rp_iface = read_rp("default")
+        if rp_all is not None and rp_iface is not None:
+            effective = max(rp_all, rp_iface)
+            if effective == 1:
+                return 3008, "[ERR_ROUTE_RP_FILTER_STRICT] 系统对 VPN 网卡启用了严格的反向路径过滤(rp_filter=1)。原因: 在启用策略路由时，严格的路径过滤会导致通过虚拟网卡 tun0 的回包被内核静默丢弃，导致连接超时。请将 net.ipv4.conf.default.rp_filter (或 net.ipv4.conf.tun0.rp_filter) 设置为 2。"
 
     return None

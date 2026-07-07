@@ -174,6 +174,12 @@ def write_json(path: Path, data: Any) -> None:
     with lock:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        if path.name == "ui_auth.json":
+            # Holds the panel password in cleartext — keep it root-only
+            try:
+                tmp.chmod(0o600)
+            except OSError:
+                pass
         tmp.replace(path)
 
 def read_json(path: Path, default: Any) -> Any:

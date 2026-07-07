@@ -392,6 +392,19 @@ def proxy_client(client: socket.socket, address: tuple[str, int]) -> None:
         except OSError:
             pass
 
+def warn_if_publicly_exposed(bound_host: str, port: int) -> None:
+    if bound_host in ("127.0.0.1", "::1", "localhost"):
+        return
+    if proxy_auth_enabled():
+        return
+    print(
+        f"[安全警告] HTTP/SOCKS5 代理正在无鉴权地监听非回环地址 {bound_host}:{port}！\n"
+        f"           任何能访问该端口的人都可将此机器用作开放代理 (open proxy)，"
+        f"极易被扫描滥用并导致服务器 IP 被封禁。\n"
+        f"           请改为监听 127.0.0.1，或通过环境变量 LOCAL_PROXY_USER / LOCAL_PROXY_PASS 启用代理鉴权。",
+        flush=True,
+    )
+
 def start_proxy_server(host: str, port: int) -> None:
     is_ipv6 = ":" in host or host == ""
     af = socket.AF_INET6 if is_ipv6 else socket.AF_INET
@@ -407,6 +420,7 @@ def start_proxy_server(host: str, port: int) -> None:
         server.bind((host, port))
         server.listen(256)
         print(f"HTTP/SOCKS5 proxy listening on {host}:{port}", flush=True)
+        warn_if_publicly_exposed(host, port)
     except Exception as e:
         if server is not None:
             try:
@@ -421,6 +435,7 @@ def start_proxy_server(host: str, port: int) -> None:
                 server.bind(("0.0.0.0", port))
                 server.listen(256)
                 print(f"HTTP/SOCKS5 proxy listening on 0.0.0.0:{port} (仅 IPv4)", flush=True)
+                warn_if_publicly_exposed("0.0.0.0", port)
             except Exception as ex:
                 import vpn_utils
                 diag = vpn_utils.diagnose_local_obstructions(port, host="0.0.0.0")
