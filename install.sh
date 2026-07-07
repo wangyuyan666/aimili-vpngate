@@ -166,6 +166,12 @@ command_background="yes"
 directory="${INSTALL_DIR}"
 pidfile="/run/aimilivpn.pid"
 
+if [ -f /etc/default/aimilivpn ]; then
+    set -a
+    . /etc/default/aimilivpn
+    set +a
+fi
+
 depend() {
     need net
     after firewall
@@ -188,6 +194,7 @@ fi
 
 # 7. Configure Custom parameters (First-time installation check)
 AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
+PROXY_ENV_FILE="/etc/default/aimilivpn"
 mkdir -p "${INSTALL_DIR}/vpngate_data"
 
 # Returns 0 if the TCP port is already taken by another process (bind test on IPv4+IPv6 wildcard)
@@ -345,6 +352,65 @@ fi
 # Config file holds the panel password in cleartext — keep it root-only even on upgrades
 chmod 600 "$AUTH_FILE" 2>/dev/null || true
 
+# 7.5 Configure public proxy listener and mandatory proxy credentials.
+# Existing LOCAL_PROXY_USER / LOCAL_PROXY_PASS are preserved; listener host is forced
+# to 0.0.0.0 so external clients can reach the HTTP/SOCKS5 proxy through the VPS IP.
+python3 - "$PROXY_ENV_FILE" "$AUTH_FILE" <<'PY'
+import json
+import os
+import secrets
+import string
+import sys
+from pathlib import Path
+
+env_file = Path(sys.argv[1])
+auth_file = Path(sys.argv[2])
+
+def parse_env(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if (len(value) >= 2) and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+def random_alnum(length: int) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+env = parse_env(env_file)
+proxy_port = "7928"
+try:
+    cfg = json.loads(auth_file.read_text(encoding="utf-8"))
+    proxy_port = str(int(cfg.get("proxy_port", 7928)))
+except Exception:
+    pass
+
+proxy_user = env.get("LOCAL_PROXY_USER") or env.get("LOCAL_PROXY_USERNAME") or ("proxy" + random_alnum(6))
+proxy_pass = env.get("LOCAL_PROXY_PASS") or env.get("LOCAL_PROXY_PASSWORD") or random_alnum(20)
+
+content = "\n".join([
+    "# AimiliVPN runtime environment",
+    "# HTTP/SOCKS5 proxy listens on all IPv4 interfaces and requires authentication.",
+    "LOCAL_PROXY_HOST=0.0.0.0",
+    f"LOCAL_PROXY_PORT={proxy_port}",
+    f"LOCAL_PROXY_USER={proxy_user}",
+    f"LOCAL_PROXY_PASS={proxy_pass}",
+    "",
+])
+env_file.parent.mkdir(parents=True, exist_ok=True)
+env_file.write_text(content, encoding="utf-8")
+os.chmod(env_file, 0o600)
+PY
+
 # 8. Start service
 # 8.5 Optimize network parameters (rp_filter for policy routing)
 # Kernel uses max(conf/all, conf/<iface>) for rp_filter, so setting conf/default=2
@@ -424,6 +490,9 @@ USERNAME="未配置"
 PASSWORD="未配置"
 UI_PORT=8787
 PROXY_PORT=7928
+PROXY_HOST="0.0.0.0"
+PROXY_USER="未配置"
+PROXY_PASS="未配置"
 AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 if [ -f "$AUTH_FILE" ]; then
     SECRET_PATH=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('secret_path', 'EJsW2EeBo9lY'))" 2>/dev/null || echo "EJsW2EeBo9lY")
@@ -431,6 +500,48 @@ if [ -f "$AUTH_FILE" ]; then
     PASSWORD=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('password', '未配置'))" 2>/dev/null || echo "未配置")
     UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 8787))" 2>/dev/null || echo "8787")
     PROXY_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('proxy_port', 7928))" 2>/dev/null || echo "7928")
+fi
+if [ -f "$PROXY_ENV_FILE" ]; then
+    PROXY_HOST=$(python3 - "$PROXY_ENV_FILE" <<'PY' 2>/dev/null || echo "0.0.0.0"
+import sys
+from pathlib import Path
+key = "LOCAL_PROXY_HOST"
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore").splitlines():
+    line = raw.strip()
+    if line.startswith(key + "="):
+        val = line.split("=", 1)[1].strip().strip("'\"")
+        print(val or "0.0.0.0")
+        break
+else:
+    print("0.0.0.0")
+PY
+)
+    PROXY_USER=$(python3 - "$PROXY_ENV_FILE" <<'PY' 2>/dev/null || echo "未配置"
+import sys
+from pathlib import Path
+keys = ("LOCAL_PROXY_USER", "LOCAL_PROXY_USERNAME")
+env = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore").splitlines():
+    line = raw.strip()
+    if "=" in line and not line.startswith("#"):
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip("'\"")
+print(next((env[k] for k in keys if env.get(k)), "未配置"))
+PY
+)
+    PROXY_PASS=$(python3 - "$PROXY_ENV_FILE" <<'PY' 2>/dev/null || echo "未配置"
+import sys
+from pathlib import Path
+keys = ("LOCAL_PROXY_PASS", "LOCAL_PROXY_PASSWORD")
+env = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore").splitlines():
+    line = raw.strip()
+    if "=" in line and not line.startswith("#"):
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip("'\"")
+print(next((env[k] for k in keys if env.get(k)), "未配置"))
+PY
+)
 fi
 
 # Get VPS public IP
@@ -451,7 +562,11 @@ if [ -n "$PUBLIC_IPV6" ]; then
 fi
 echo -e "  * 网页管理账号:  ${YELLOW}${USERNAME}${PLAIN}"
 echo -e "  * 网页管理密码:  ${YELLOW}${PASSWORD}${PLAIN}"
-echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:${PROXY_PORT}/${PLAIN}  或  ${BLUE}http://[::1]:${PROXY_PORT}/${PLAIN}"
+echo -e "  * HTTP/SOCKS5 代理监听:  ${YELLOW}${PROXY_HOST}:${PROXY_PORT}${PLAIN}"
+echo -e "  * 代理账号:        ${YELLOW}${PROXY_USER}${PLAIN}"
+echo -e "  * 代理密码:        ${YELLOW}${PROXY_PASS}${PLAIN}"
+echo -e "  * HTTP 代理地址:   ${BLUE}http://${PROXY_USER}:${PROXY_PASS}@${PUBLIC_IP}:${PROXY_PORT}/${PLAIN}"
+echo -e "  * SOCKS5 代理地址: ${BLUE}socks5://${PROXY_USER}:${PROXY_PASS}@${PUBLIC_IP}:${PROXY_PORT}/${PLAIN}"
 echo -e " --------------------------------------------------------"
 echo -e "  * 快速状态指令:   ${YELLOW}ml status${PLAIN}  或  ${YELLOW}ml${PLAIN}"
 echo -e "  * 查看实时日志:   ${YELLOW}ml logs${PLAIN}"

@@ -54,6 +54,38 @@ def save_ui_cfg(cfg):
     except Exception:
         return False
 
+def load_proxy_auth_cfg():
+    import json
+    env_path = "/etc/default/aimilivpn"
+    data_path = "/opt/aimilivpn/vpngate_data/local_proxy_auth.json"
+    cfg = {"host": "0.0.0.0", "username": "", "password": ""}
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    value = value.strip().strip("'\"")
+                    if key == "LOCAL_PROXY_HOST":
+                        cfg["host"] = value or cfg["host"]
+                    elif key in ("LOCAL_PROXY_USER", "LOCAL_PROXY_USERNAME"):
+                        cfg["username"] = value
+                    elif key in ("LOCAL_PROXY_PASS", "LOCAL_PROXY_PASSWORD"):
+                        cfg["password"] = value
+        except Exception:
+            pass
+    if (not cfg["username"] or not cfg["password"]) and os.path.exists(data_path):
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg["username"] = cfg["username"] or str(data.get("username") or "")
+            cfg["password"] = cfg["password"] or str(data.get("password") or "")
+        except Exception:
+            pass
+    return cfg
+
 def load_state():
     import json
     path = "/opt/aimilivpn/vpngate_data/state.json"
@@ -286,6 +318,12 @@ def print_status():
     curr_pwd = cfg.get("password", "")
     masked_pwd = curr_pwd if len(curr_pwd) <= 4 else curr_pwd[:3] + "********" + curr_pwd[-2:]
     print_line(format_line("网页管理密码", masked_pwd))
+    proxy_auth = load_proxy_auth_cfg()
+    proxy_pwd = proxy_auth.get("password", "")
+    masked_proxy_pwd = proxy_pwd if len(proxy_pwd) <= 4 else proxy_pwd[:3] + "********" + proxy_pwd[-2:]
+    print_line(format_line("代理监听地址", f"{proxy_auth.get('host', '0.0.0.0')}:{proxy_port}"))
+    print_line(format_line("代理账号", proxy_auth.get("username") or "未配置"))
+    print_line(format_line("代理密码", masked_proxy_pwd or "未配置"))
     print_line()
     print_line("【活动节点状态】")
     if is_connecting:
@@ -308,7 +346,7 @@ def print_status():
     else:
         print_line(format_line("节点状态", "无活动连接"))
     print_line()
-    local_proxy = state.get("local_proxy", f"http://127.0.0.1:{proxy_port}")
+    local_proxy = state.get("local_proxy", f"http://0.0.0.0:{proxy_port}")
     import urllib.parse
     try:
         parsed = urllib.parse.urlsplit(local_proxy)
@@ -320,15 +358,20 @@ def print_status():
     
     if proxy_host == "::":
         proxy_addr = "127.0.0.1"
+    elif proxy_host == "0.0.0.0":
+        proxy_addr = get_public_ip()
     elif ":" in proxy_host:
         proxy_addr = f"[{proxy_host}]"
     else:
         proxy_addr = proxy_host
 
     print_line("【使用方法】")
-    print_line(f"  export http_proxy=http://{proxy_addr}:{proxy_port}")
-    print_line(f"  export https_proxy=http://{proxy_addr}:{proxy_port}")
-    print_line(f"  # 也可用于 SOCKS5: socks5://{proxy_addr}:{proxy_port}")
+    auth_prefix = ""
+    if proxy_auth.get("username") or proxy_auth.get("password"):
+        auth_prefix = f"{proxy_auth.get('username', '')}:{proxy_auth.get('password', '')}@"
+    print_line(f"  export http_proxy=http://{auth_prefix}{proxy_addr}:{proxy_port}")
+    print_line(f"  export https_proxy=http://{auth_prefix}{proxy_addr}:{proxy_port}")
+    print_line(f"  # 也可用于 SOCKS5: socks5://{auth_prefix}{proxy_addr}:{proxy_port}")
     print_line("=======================================================")
 
 def run_service_cmd(cmd):

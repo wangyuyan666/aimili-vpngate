@@ -58,27 +58,27 @@ bash <(curl -Ls https://raw.githubusercontent.com/wangyuyan666/aimili-vpngate/ma
    - **固定 IP 节点**：始终锁定连接到这一个特定节点。
 
 #### 第三步：使用本机代理 (核心步骤)
-为了防止代理端口暴露至公网被恶意扫描和滥用，AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCKS5 和 HTTP 协议）**默认仅绑定在本地回环地址（`127.0.0.1`）**，只接收 VPS 本机上的流量，不对外机提供代理。
+AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCKS5 和 HTTP 协议）默认监听 **`0.0.0.0`**，外部设备可通过 `服务器公网 IP:7928` 访问；安装脚本会自动生成 `LOCAL_PROXY_USER` / `LOCAL_PROXY_PASS` 代理账号密码。
 
 * **🐍 Python 脚本中使用代理**:
   ```python
   import requests
   proxies = {
-      "http": "http://127.0.0.1:7928",
-      "https": "http://127.0.0.1:7928",
+      "http": "http://代理账号:代理密码@服务器公网IP:7928",
+      "https": "http://代理账号:代理密码@服务器公网IP:7928",
   }
   response = requests.get("https://www.google.com", proxies=proxies)
   ```
 * **🐚 Shell 终端环境中使用代理**:
   在命令行执行以下命令，可以让当前终端的后续命令（如 `curl`、`wget` 等）走代理出口：
   ```bash
-  export http_proxy="http://127.0.0.1:7928"
-  export https_proxy="http://127.0.0.1:7928"
+  export http_proxy="http://代理账号:代理密码@服务器公网IP:7928"
+  export https_proxy="http://代理账号:代理密码@服务器公网IP:7928"
   ```
 * **⚙️ 本地其他服务配置**:
-  将本机的其他代理工具、爬虫框架或服务的出战代理设置为 `127.0.0.1:7928`。
+  将本机或外部设备的代理工具、爬虫框架或服务的出站代理设置为 `http://代理账号:代理密码@服务器公网IP:7928`，SOCKS5 客户端则使用 `socks5://代理账号:代理密码@服务器公网IP:7928`。
 
-> 💡 **小贴士**：如果您确实需要对公网其他设备开放此代理端口，可以通过设置环境变量 `export LOCAL_PROXY_HOST="::"` 重新启动服务以允许公网接入。
+> 💡 **小贴士**：代理监听与鉴权配置保存在 `/etc/default/aimilivpn`，修改 `LOCAL_PROXY_HOST`、`LOCAL_PROXY_USER`、`LOCAL_PROXY_PASS` 后重启服务即可生效。
 
 ---
 
@@ -180,27 +180,27 @@ Open your browser and navigate to the printed URL (e.g. `http://your_vps_ip:8787
 2. Under "Admin", you can trigger node fetching. The backend concurrently tests official VPNGate nodes and ranks them by latency. To use VPNBook servers instead, switch the node provider in the proxy settings dialog (credentials are scraped and refreshed automatically).
 3. Switch routes mode (Smart Auto, Specific Region, or Specific Server Node) according to your needs.
 
-#### Step 3: Use Localhost Proxy (Core Step)
-To prevent unauthorized scanning and abuse of the proxy port on the public internet, the built-in HTTP/SOCKS5 proxy server (default port **`7928`**) **binds to localhost (`127.0.0.1`) by default**. It is designed to route traffic generated locally on the VPS, rather than acting as a public proxy server.
+#### Step 3: Use Public Authenticated Proxy (Core Step)
+The built-in HTTP/SOCKS5 proxy server (default port **`7928`**) binds to **`0.0.0.0`** by default, so external devices can access it through `VPS_PUBLIC_IP:7928`. The installer automatically generates `LOCAL_PROXY_USER` / `LOCAL_PROXY_PASS` credentials.
 
 * **🐍 Proxy in Python**:
   ```python
   import requests
   proxies = {
-      "http": "http://127.0.0.1:7928",
-      "https": "http://127.0.0.1:7928",
+      "http": "http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928",
+      "https": "http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928",
   }
   response = requests.get("https://www.google.com", proxies=proxies)
   ```
 * **🐚 Proxy in Shell terminal**:
   ```bash
-  export http_proxy="http://127.0.0.1:7928"
-  export https_proxy="http://127.0.0.1:7928"
+  export http_proxy="http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928"
+  export https_proxy="http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928"
   ```
 * **⚙️ Other local services**:
-  Configure your scrapers, frameworks, or utility tools on this VPS to send traffic via `127.0.0.1:7928`.
+  Configure scrapers, frameworks, or utility tools to use `http://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928`; SOCKS5 clients can use `socks5://proxy_user:proxy_pass@VPS_PUBLIC_IP:7928`.
 
-> 💡 **Quick Note**: If you really need to open this proxy port to the public internet, you can set the environment variable `export LOCAL_PROXY_HOST="::"` before running the manager.
+> 💡 **Quick Note**: Proxy listener and authentication settings are stored in `/etc/default/aimilivpn`; edit `LOCAL_PROXY_HOST`, `LOCAL_PROXY_USER`, or `LOCAL_PROXY_PASS`, then restart the service.
 
 ---
 

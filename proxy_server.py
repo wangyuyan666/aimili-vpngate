@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import base64
+import json
 import os
 import secrets
 import select
 import socket
+import string
 import threading
 import urllib.parse
 import time
+from pathlib import Path
 from typing import Any
 
 def parse_positive_int(value: str | None, default: int) -> int:
@@ -24,6 +27,40 @@ def parse_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+def local_proxy_auth_file() -> Path:
+    data_dir = os.environ.get("VPNGATE_DATA_DIR")
+    base_dir = Path(data_dir).resolve() if data_dir else Path.cwd() / "vpngate_data"
+    return base_dir / "local_proxy_auth.json"
+
+def random_alnum(length: int) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+def load_or_create_local_proxy_credentials() -> tuple[str, str]:
+    auth_file = local_proxy_auth_file()
+    try:
+        if auth_file.exists():
+            data = json.loads(auth_file.read_text(encoding="utf-8"))
+            username = str(data.get("username") or "")
+            password = str(data.get("password") or "")
+            if username and password:
+                return username, password
+    except Exception:
+        pass
+
+    username = "proxy" + random_alnum(6)
+    password = random_alnum(20)
+    try:
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(
+            json.dumps({"username": username, "password": password}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(auth_file, 0o600)
+    except Exception:
+        pass
+    return username, password
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     data = b""
@@ -53,7 +90,7 @@ def get_proxy_credentials() -> tuple[str | None, str | None]:
     user = os.environ.get("LOCAL_PROXY_USER") or os.environ.get("LOCAL_PROXY_USERNAME")
     password = os.environ.get("LOCAL_PROXY_PASS") or os.environ.get("LOCAL_PROXY_PASSWORD")
     if user is None and password is None:
-        return None, None
+        return load_or_create_local_proxy_credentials()
     return user or "", password or ""
 
 def proxy_auth_enabled() -> bool:
@@ -420,6 +457,12 @@ def start_proxy_server(host: str, port: int) -> None:
         server.bind((host, port))
         server.listen(256)
         print(f"HTTP/SOCKS5 proxy listening on {host}:{port}", flush=True)
+        auth_user, auth_pass = get_proxy_credentials()
+        if auth_user is not None and auth_pass is not None:
+            print(
+                f"HTTP/SOCKS5 proxy auth enabled: user={auth_user}, password={auth_pass}",
+                flush=True,
+            )
         warn_if_publicly_exposed(host, port)
     except Exception as e:
         if server is not None:
