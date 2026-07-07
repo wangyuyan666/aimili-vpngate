@@ -240,7 +240,9 @@ def load_ui_config() -> dict[str, Any]:
             "fixed_node_id": "",
             "favorite_node_ids": [],
             "fav_fail_fallback": False,
-            "node_provider": "vpngate"
+            "node_provider": "vpngate",
+            "telegram_bot_token": "",
+            "telegram_chat_ids": []
         }
         updated = False
         if auth_file.exists():
@@ -248,7 +250,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "node_provider"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "node_provider", "telegram_bot_token", "telegram_chat_ids"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -408,6 +410,8 @@ def get_state() -> dict[str, Any]:
     state["fav_fail_fallback"] = False
     provider = str(ui_cfg.get("node_provider") or "vpngate").strip().lower()
     state["node_provider"] = provider if provider in NODE_PROVIDERS else "vpngate"
+    state["telegram_token_set"] = bool(ui_cfg.get("telegram_bot_token"))
+    state["telegram_chat_ids"] = [str(x) for x in (ui_cfg.get("telegram_chat_ids") or []) if str(x).strip()]
 
     return state
 
@@ -3460,7 +3464,20 @@ INDEX_HTML = r"""<!doctype html>
             ℹ️ <strong>自动配置</strong>：全自动测试并选择最佳IP。在使用过程中，如果当前连接节点没有失效，将不再更换IP；如果当前节点失效，系统将立刻秒级自动漂移到其他最快的可用节点。
           </div>
         </div>
-        
+
+        <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 16px; margin-bottom: 16px;">
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label class="form-label" for="net_tg_token">Telegram Bot Token</label>
+            <input type="password" id="net_tg_token" class="input-field" autocomplete="off" placeholder="留空保留当前配置，输入 off 停用">
+            <div id="net_tg_token_hint" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">未配置。向 @BotFather 发送 /newbot 创建 Bot 获取 Token。</div>
+          </div>
+          <div class="form-group" style="margin-bottom: 4px;">
+            <label class="form-label" for="net_tg_chat_ids">Telegram 白名单 Chat ID (逗号分隔)</label>
+            <input type="text" id="net_tg_chat_ids" class="input-field" placeholder="例如 123456789">
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">保存 Token 后给 Bot 发任意消息，回复中会显示你的 Chat ID，填入此处即可。命令: /status /nodes /connect /disconnect /refresh</div>
+          </div>
+        </div>
+
         <div style="display: flex; gap: 12px; justify-content: flex-end;">
           <button type="button" onclick="closeNetworkModal()" style="height: 40px; padding: 0 16px; font-weight: 600; border-radius: 8px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer;">取消</button>
           <button type="submit" id="network_submit_btn" class="btn-primary" style="height: 40px; padding: 0 20px; font-weight: 600; border-radius: 8px;">保存修改</button>
@@ -4543,8 +4560,14 @@ function openNetworkModal() {
     selectOptionCard('routing_mode', mode);
     selectOptionCard('routing_ip_type', ipType);
     selectOptionCard('node_provider', provider);
+
+    $("net_tg_token").value = "";
+    $("net_tg_chat_ids").value = (state.telegram_chat_ids || []).join(", ");
+    $("net_tg_token_hint").textContent = state.telegram_token_set
+      ? "已配置。留空保留当前 Token，输入 off 停用 Bot。"
+      : "未配置。向 @BotFather 发送 /newbot 创建 Bot 获取 Token。";
   }
-  
+
   populateRoutingCountries();
   $("network_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
@@ -4604,7 +4627,9 @@ async function saveNetwork(e) {
         routing_mode: routingMode,
         force_country: forceCountry,
         routing_ip_type: routingIpType,
-        node_provider: nodeProvider
+        node_provider: nodeProvider,
+        telegram_bot_token: $("net_tg_token").value.trim(),
+        telegram_chat_ids: $("net_tg_chat_ids").value.trim()
       })
     });
     
@@ -5478,6 +5503,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "无效的节点来源"}, HTTPStatus.BAD_REQUEST)
                     return
 
+                telegram_bot_token = str(payload.get("telegram_bot_token") or "").strip()
+                telegram_chat_ids_raw = str(payload.get("telegram_chat_ids") or "").strip()
+                telegram_chat_ids = [item for item in re.split(r"[\s,;，、；]+", telegram_chat_ids_raw) if item]
+                for chat_id in telegram_chat_ids:
+                    if not re.fullmatch(r"-?\d+", chat_id):
+                        self.send_json({"ok": False, "error": f"Telegram Chat ID 必须是数字: {chat_id}"}, HTTPStatus.BAD_REQUEST)
+                        return
+
                 ui_cfg = load_ui_config()
                 expected_proxy_port = ui_cfg.get("proxy_port", 7928)
                 previous_provider = str(ui_cfg.get("node_provider") or "vpngate").strip().lower()
@@ -5499,6 +5532,12 @@ class Handler(BaseHTTPRequestHandler):
                 ui_cfg["force_country"] = force_country
                 ui_cfg["routing_ip_type"] = routing_ip_type
                 ui_cfg["node_provider"] = node_provider
+                # token 留空表示保留当前配置，填 off 表示停用 Bot
+                if telegram_bot_token.lower() == "off":
+                    ui_cfg["telegram_bot_token"] = ""
+                elif telegram_bot_token:
+                    ui_cfg["telegram_bot_token"] = telegram_bot_token
+                ui_cfg["telegram_chat_ids"] = telegram_chat_ids
                 if provider_changed:
                     ui_cfg["fixed_node_id"] = ""
                 if routing_mode == "favorites":
@@ -5669,23 +5708,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/disconnect":
             try:
-                ui_cfg = load_ui_config()
-                ui_cfg["connection_enabled"] = False
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
-                
-                stop_active_openvpn()
-                with lock:
-                    nodes = read_nodes()
-                    for item in nodes:
-                        item["active"] = False
-                    write_json(nodes_file(), nodes)
-                global last_active_ping_time, last_active_latency
-                last_active_ping_time = 0.0
-                last_active_latency = 0
-                set_state(active_openvpn_node_id="", last_check_message="手动断开连接", active_node_latency="无活动连接")
+                manual_disconnect()
                 self.send_json({"ok": True})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -5767,6 +5790,208 @@ class Tee:
     def __getattr__(self, attr: str) -> Any:
         return getattr(self.stdout, attr)
 
+def manual_disconnect(message: str = "手动断开连接") -> None:
+    global last_active_ping_time, last_active_latency
+    ui_cfg = load_ui_config()
+    ui_cfg["connection_enabled"] = False
+    auth_file = DATA_DIR / "ui_auth.json"
+    with lock:
+        DATA_DIR.mkdir(exist_ok=True, parents=True)
+        write_json(auth_file, ui_cfg)
+
+    stop_active_openvpn()
+    with lock:
+        nodes = read_nodes()
+        for item in nodes:
+            item["active"] = False
+        write_json(nodes_file(), nodes)
+    last_active_ping_time = 0.0
+    last_active_latency = 0
+    set_state(active_openvpn_node_id="", last_check_message=message, active_node_latency="无活动连接")
+
+# ---------------------------------------------------------------------------
+# Telegram Bot：通过聊天命令远程查看状态与切换节点（getUpdates 长轮询，无需公网回调）
+# ---------------------------------------------------------------------------
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_NODES_LIMIT = 30
+TELEGRAM_HELP_TEXT = (
+    "可用命令:\n"
+    "/status - 查看当前连接与代理状态\n"
+    "/nodes - 查看可用节点列表\n"
+    "/connect 序号或节点ID - 切换到指定节点\n"
+    "/disconnect - 断开当前连接并停用自动重连\n"
+    "/refresh - 后台重新拉取并测试节点\n"
+    "/help - 显示本帮助"
+)
+# 每个 chat 最近一次 /nodes 列表的节点 id，序号连接时按此映射
+telegram_node_listing: dict[str, list[str]] = {}
+
+def telegram_api(token: str, method: str, payload: dict[str, Any] | None = None, timeout: int = 15) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"{TELEGRAM_API_BASE}/bot{token}/{method}",
+        data=json.dumps(payload or {}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data if isinstance(data, dict) else {}
+
+def telegram_send(token: str, chat_id: Any, text: str) -> None:
+    # Telegram 单条消息上限 4096 字符，超长分段发送
+    for start in range(0, len(text), 4000):
+        try:
+            telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": text[start:start + 4000]})
+        except Exception as exc:
+            print(f"[Telegram] 发送消息失败: {exc}", flush=True)
+            return
+
+def telegram_status_text() -> str:
+    state = get_state()
+    active_id = str(state.get("active_openvpn_node_id") or "")
+    lines = [f"节点来源: {state.get('node_provider')}"]
+    if active_id:
+        node = next((n for n in read_nodes() if n.get("id") == active_id), None)
+        country = (node or {}).get("country") or "未知"
+        lines.append(f"当前节点: {active_id} ({country})")
+        lines.append(f"节点延迟: {state.get('active_node_latency') or '-'}")
+    else:
+        lines.append("当前节点: 无活动连接")
+    if state.get("proxy_ok"):
+        lines.append(f"代理出口: ✅ {state.get('proxy_ip')} ({state.get('proxy_latency_ms')} ms)")
+    else:
+        lines.append(f"代理出口: ❌ {state.get('proxy_error') or '不可用'}")
+    lines.append(f"最近消息: {state.get('last_check_message') or '-'}")
+    return "\n".join(lines)
+
+def telegram_nodes_text(chat_id: Any) -> str:
+    nodes = read_nodes()
+    if not nodes:
+        return "节点列表为空，可发送 /refresh 重新拉取"
+
+    def sort_key(node: dict[str, Any]) -> tuple[int, int, int]:
+        status = str(node.get("probe_status") or "")
+        if node.get("active"):
+            rank = 0
+        elif status == "available":
+            rank = 1
+        elif status in ("not_checked", "testing"):
+            rank = 2
+        else:
+            rank = 3
+        return (rank, parse_int(node.get("ping")) or 999999, -parse_int(node.get("score")))
+
+    ordered = sorted(nodes, key=sort_key)[:TELEGRAM_NODES_LIMIT]
+    status_marks = {"available": "✅", "unavailable": "❌"}
+    lines = [f"节点列表 (来源 {current_provider()}，共 {len(nodes)} 个，显示前 {len(ordered)} 个):"]
+    ids: list[str] = []
+    for index, node in enumerate(ordered, start=1):
+        ids.append(str(node.get("id") or ""))
+        mark = status_marks.get(str(node.get("probe_status") or ""), "❓")
+        ping = parse_int(node.get("ping"))
+        ping_text = f" {ping}ms" if ping > 0 else ""
+        active_text = " ←当前" if node.get("active") else ""
+        lines.append(f"{index}. {mark} {node.get('country') or '未知'} {node.get('id')}{ping_text}{active_text}")
+    with lock:
+        telegram_node_listing[str(chat_id)] = ids
+    lines.append("发送 /connect 序号 切换节点，例如 /connect 1")
+    return "\n".join(lines)
+
+def telegram_resolve_node_id(chat_id: Any, arg: str) -> str:
+    arg = arg.strip()
+    if not arg:
+        raise ValueError("请带上节点序号或 ID，例如 /connect 1；先用 /nodes 查看列表")
+    if re.fullmatch(r"\d+", arg):
+        with lock:
+            ids = telegram_node_listing.get(str(chat_id)) or []
+        if not ids:
+            raise ValueError("序号列表已失效，请先发送 /nodes 获取最新列表")
+        index = int(arg)
+        if not (1 <= index <= len(ids)):
+            raise ValueError(f"序号超出范围 (1-{len(ids)})，请先发送 /nodes")
+        return ids[index - 1]
+    return arg
+
+def telegram_handle_command(token: str, chat_id: Any, text: str) -> None:
+    parts = text.split(maxsplit=1)
+    command = parts[0].split("@", 1)[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if command in ("/start", "/help"):
+        telegram_send(token, chat_id, TELEGRAM_HELP_TEXT)
+    elif command == "/status":
+        telegram_send(token, chat_id, telegram_status_text())
+    elif command == "/nodes":
+        telegram_send(token, chat_id, telegram_nodes_text(chat_id))
+    elif command == "/connect":
+        node_id = telegram_resolve_node_id(chat_id, arg)
+        with lock:
+            busy = is_connecting
+        if busy:
+            telegram_send(token, chat_id, "当前已有连接或节点检测任务正在运行，请稍后再试")
+            return
+
+        def worker() -> None:
+            try:
+                telegram_send(token, chat_id, f"✅ {connect_node(node_id)}")
+            except Exception as exc:
+                telegram_send(token, chat_id, f"❌ 连接失败: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        telegram_send(token, chat_id, f"正在连接节点 {node_id} ，完成后会通知结果...")
+    elif command == "/disconnect":
+        manual_disconnect("Telegram 手动断开连接")
+        telegram_send(token, chat_id, "已断开连接并停用自动重连，发送 /connect 可重新连接")
+    elif command == "/refresh":
+        if maintenance_lock.locked():
+            telegram_send(token, chat_id, "节点维护任务正在运行，请稍后再试")
+        else:
+            threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
+            telegram_send(token, chat_id, "已在后台启动节点更新流程，稍后用 /nodes 查看结果")
+    else:
+        telegram_send(token, chat_id, f"未知命令: {command}\n\n{TELEGRAM_HELP_TEXT}")
+
+def telegram_bot_loop() -> None:
+    offset = 0
+    last_token = ""
+    while True:
+        cfg = load_ui_config()
+        token = str(cfg.get("telegram_bot_token") or "").strip()
+        if not token:
+            last_token = ""
+            time.sleep(10)
+            continue
+        if token != last_token:
+            last_token = token
+            offset = 0
+            print("[Telegram] Bot 已启用，开始长轮询消息...", flush=True)
+            log_to_json("INFO", "Telegram", "Bot 已启用，开始长轮询消息")
+        try:
+            resp = telegram_api(token, "getUpdates", {"timeout": 25, "offset": offset, "allowed_updates": ["message"]}, timeout=35)
+        except Exception as exc:
+            print(f"[Telegram] 轮询失败: {exc}", flush=True)
+            time.sleep(10)
+            continue
+        if not resp.get("ok"):
+            print(f"[Telegram] getUpdates 返回错误: {resp.get('description') or resp}", flush=True)
+            time.sleep(10)
+            continue
+        allowed_ids = {str(x).strip() for x in (cfg.get("telegram_chat_ids") or []) if str(x).strip()}
+        for update in resp.get("result") or []:
+            offset = max(offset, parse_int(update.get("update_id")) + 1)
+            message = update.get("message") or {}
+            chat_id = (message.get("chat") or {}).get("id")
+            text = str(message.get("text") or "").strip()
+            if chat_id is None or not text:
+                continue
+            if str(chat_id) not in allowed_ids:
+                telegram_send(token, chat_id, f"未授权。请在管理页面「代理设置」中把此 Chat ID 加入白名单: {chat_id}")
+                continue
+            try:
+                telegram_handle_command(token, chat_id, text)
+            except Exception as exc:
+                telegram_send(token, chat_id, f"命令执行出错: {exc}")
+
 def main() -> None:
     ensure_dirs()
     kill_existing_openvpn_processes()
@@ -5840,6 +6065,7 @@ def main() -> None:
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     threading.Thread(target=active_node_pinger, daemon=True).start()
+    threading.Thread(target=telegram_bot_loop, daemon=True).start()
     
     ui_cfg = load_ui_config()
     ui_host = ui_cfg.get("host", UI_HOST)
