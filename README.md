@@ -36,8 +36,9 @@ AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN
 
 #### 🌟 正式稳定版本 (main 分支)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wangyuyan666/aimili-vpngate/main/install.sh)
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/wangyuyan666/aimili-vpngate@main/install.sh || curl -fsSL https://raw.githubusercontent.com/wangyuyan666/aimili-vpngate/main/install.sh)
 ```
+> 📶 优先走 jsDelivr CDN（不受 GitHub 限流影响），失败时自动回退到 GitHub Raw。
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
 ---
@@ -163,8 +164,9 @@ Run the corresponding command on your Linux VPS as root:
 
 #### 🌟 Stable Release (main branch)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wangyuyan666/aimili-vpngate/main/install.sh)
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/wangyuyan666/aimili-vpngate@main/install.sh || curl -fsSL https://raw.githubusercontent.com/wangyuyan666/aimili-vpngate/main/install.sh)
 ```
+> 📶 Fetches via the jsDelivr CDN first (immune to GitHub rate limits), falling back to GitHub Raw automatically.
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
 
