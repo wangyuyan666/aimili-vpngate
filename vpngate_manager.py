@@ -5817,7 +5817,7 @@ def manual_disconnect(message: str = "手动断开连接") -> None:
 # ---------------------------------------------------------------------------
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
-TELEGRAM_NODES_LIMIT = 30
+TELEGRAM_IP_TYPE_LABELS = {"residential": "住宅", "mobile": "移动", "hosting": "机房", "proxy": "代理"}
 TELEGRAM_HELP_TEXT = (
     "可用命令:\n"
     "/status - 查看当前连接与代理状态\n"
@@ -5841,10 +5841,23 @@ def telegram_api(token: str, method: str, payload: dict[str, Any] | None = None,
     return data if isinstance(data, dict) else {}
 
 def telegram_send(token: str, chat_id: Any, text: str) -> None:
-    # Telegram 单条消息上限 4096 字符，超长分段发送
-    for start in range(0, len(text), 4000):
+    # Telegram 单条消息上限 4096 字符，超长按行分段发送，避免行中间截断
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > 4000:
+            chunks.append(line[:4000])
+            line = line[4000:]
+        if len(current) + len(line) + 1 > 4000:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    for chunk in chunks:
         try:
-            telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": text[start:start + 4000]})
+            telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": chunk})
         except Exception as exc:
             print(f"[Telegram] 发送消息失败: {exc}", flush=True)
             return
@@ -5884,20 +5897,29 @@ def telegram_nodes_text(chat_id: Any) -> str:
             rank = 3
         return (rank, parse_int(node.get("ping")) or 999999, -parse_int(node.get("score")))
 
-    ordered = sorted(nodes, key=sort_key)[:TELEGRAM_NODES_LIMIT]
+    ordered = sorted(nodes, key=sort_key)
     status_marks = {"available": "✅", "unavailable": "❌"}
-    lines = [f"节点列表 (来源 {current_provider()}，共 {len(nodes)} 个，显示前 {len(ordered)} 个):"]
+    lines = [f"📡 节点列表 · 来源 {current_provider()} · 共 {len(ordered)} 个", ""]
     ids: list[str] = []
+    width = len(str(len(ordered)))
     for index, node in enumerate(ordered, start=1):
         ids.append(str(node.get("id") or ""))
         mark = status_marks.get(str(node.get("probe_status") or ""), "❓")
+        parts = [f"{str(index).rjust(width)}. {mark} {node.get('country') or '未知'}"]
         ping = parse_int(node.get("ping"))
-        ping_text = f" {ping}ms" if ping > 0 else ""
-        active_text = " ←当前" if node.get("active") else ""
-        lines.append(f"{index}. {mark} {node.get('country') or '未知'} {node.get('id')}{ping_text}{active_text}")
+        if ping > 0:
+            parts.append(f"⏱{ping}ms")
+        ip_type = str(node.get("ip_type") or "")
+        parts.append(TELEGRAM_IP_TYPE_LABELS.get(ip_type, "未知"))
+        parts.append(str(node.get("id") or ""))
+        line = " · ".join(parts)
+        if node.get("active"):
+            line += " 🔵当前"
+        lines.append(line)
     with lock:
         telegram_node_listing[str(chat_id)] = ids
-    lines.append("发送 /connect 序号 切换节点，例如 /connect 1")
+    lines.append("")
+    lines.append("👉 发送 /connect 序号 切换节点，例如 /connect 1")
     return "\n".join(lines)
 
 def telegram_resolve_node_id(chat_id: Any, arg: str) -> str:
