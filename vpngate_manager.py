@@ -5889,27 +5889,24 @@ def telegram_nodes_text(chat_id: Any) -> str:
     if not nodes:
         return "📭 节点列表为空\n\n👉 发送 /refresh 重新拉取"
 
+    connectable = [
+        node for node in nodes
+        if node.get("active") or str(node.get("probe_status") or "") == "available"
+    ]
+    if not connectable:
+        return "📭 暂无可连接的节点\n\n👉 发送 /refresh 重新检测节点"
+
     def sort_key(node: dict[str, Any]) -> tuple[int, int, int]:
-        status = str(node.get("probe_status") or "")
-        if node.get("active"):
-            rank = 0
-        elif status == "available":
-            rank = 1
-        elif status in ("not_checked", "testing"):
-            rank = 2
-        else:
-            rank = 3
+        rank = 0 if node.get("active") else 1
         return (rank, parse_int(node.get("ping")) or 999999, -parse_int(node.get("score")))
 
-    ordered = sorted(nodes, key=sort_key)
-    status_marks = {"available": "✅", "unavailable": "❌"}
-    lines = [f"📡 节点列表 · 来源 {current_provider()} · 共 {len(ordered)} 个", ""]
+    ordered = sorted(connectable, key=sort_key)
+    lines = [f"📡 可连接节点 · 来源 {current_provider()} · 共 {len(ordered)} 个", ""]
     ids: list[str] = []
     width = len(str(len(ordered)))
     for index, node in enumerate(ordered, start=1):
         ids.append(str(node.get("id") or ""))
-        mark = status_marks.get(str(node.get("probe_status") or ""), "❓")
-        parts = [f"{str(index).rjust(width)}. {mark} {node.get('country') or '未知'}"]
+        parts = [f"{str(index).rjust(width)}. ✅ {node.get('country') or '未知'}"]
         ping = parse_int(node.get("ping"))
         if ping > 0:
             parts.append(f"⏱{ping}ms")
