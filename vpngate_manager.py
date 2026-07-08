@@ -5819,13 +5819,14 @@ def manual_disconnect(message: str = "手动断开连接") -> None:
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_IP_TYPE_LABELS = {"residential": "住宅", "mobile": "移动", "hosting": "机房", "proxy": "代理"}
 TELEGRAM_HELP_TEXT = (
-    "可用命令:\n"
-    "/status - 查看当前连接与代理状态\n"
-    "/nodes - 查看可用节点列表\n"
-    "/connect 序号或节点ID - 切换到指定节点\n"
-    "/disconnect - 断开当前连接并停用自动重连\n"
-    "/refresh - 后台重新拉取并测试节点\n"
-    "/help - 显示本帮助"
+    "🤖 可用命令\n"
+    "\n"
+    "📊 /status · 查看当前连接与代理状态\n"
+    "📡 /nodes · 查看可用节点列表\n"
+    "🔌 /connect 序号或节点ID · 切换到指定节点\n"
+    "⛔ /disconnect · 断开当前连接并停用自动重连\n"
+    "🔄 /refresh · 后台重新拉取并测试节点\n"
+    "❓ /help · 显示本帮助"
 )
 # 每个 chat 最近一次 /nodes 列表的节点 id，序号连接时按此映射
 telegram_node_listing: dict[str, list[str]] = {}
@@ -5865,25 +5866,28 @@ def telegram_send(token: str, chat_id: Any, text: str) -> None:
 def telegram_status_text() -> str:
     state = get_state()
     active_id = str(state.get("active_openvpn_node_id") or "")
-    lines = [f"节点来源: {state.get('node_provider')}"]
+    lines = [f"📊 当前状态 · 来源 {state.get('node_provider')}", ""]
     if active_id:
-        node = next((n for n in read_nodes() if n.get("id") == active_id), None)
-        country = (node or {}).get("country") or "未知"
-        lines.append(f"当前节点: {active_id} ({country})")
-        lines.append(f"节点延迟: {state.get('active_node_latency') or '-'}")
+        node = next((n for n in read_nodes() if n.get("id") == active_id), None) or {}
+        ip_type = TELEGRAM_IP_TYPE_LABELS.get(str(node.get("ip_type") or ""), "未知")
+        lines.append(f"🔵 当前节点: {node.get('country') or '未知'} · {ip_type} · {active_id}")
+        lines.append(f"⏱ 节点延迟: {state.get('active_node_latency') or '-'}")
     else:
-        lines.append("当前节点: 无活动连接")
+        lines.append("⚪ 当前节点: 无活动连接")
     if state.get("proxy_ok"):
-        lines.append(f"代理出口: ✅ {state.get('proxy_ip')} ({state.get('proxy_latency_ms')} ms)")
+        lines.append(f"🌐 代理出口: ✅ {state.get('proxy_ip')} · {state.get('proxy_latency_ms')}ms")
     else:
-        lines.append(f"代理出口: ❌ {state.get('proxy_error') or '不可用'}")
-    lines.append(f"最近消息: {state.get('last_check_message') or '-'}")
+        lines.append(f"🌐 代理出口: ❌ {state.get('proxy_error') or '不可用'}")
+    lines.append(f"💬 最近消息: {state.get('last_check_message') or '-'}")
+    if not active_id:
+        lines.append("")
+        lines.append("👉 发送 /nodes 查看可用节点")
     return "\n".join(lines)
 
 def telegram_nodes_text(chat_id: Any) -> str:
     nodes = read_nodes()
     if not nodes:
-        return "节点列表为空，可发送 /refresh 重新拉取"
+        return "📭 节点列表为空\n\n👉 发送 /refresh 重新拉取"
 
     def sort_key(node: dict[str, Any]) -> tuple[int, int, int]:
         status = str(node.get("probe_status") or "")
@@ -5953,28 +5957,28 @@ def telegram_handle_command(token: str, chat_id: Any, text: str) -> None:
         with lock:
             busy = is_connecting
         if busy:
-            telegram_send(token, chat_id, "当前已有连接或节点检测任务正在运行，请稍后再试")
+            telegram_send(token, chat_id, "⏳ 当前已有连接或节点检测任务正在运行，请稍后再试")
             return
 
         def worker() -> None:
             try:
-                telegram_send(token, chat_id, f"✅ {connect_node(node_id)}")
+                telegram_send(token, chat_id, f"✅ {connect_node(node_id)}\n\n👉 发送 /status 查看连接详情")
             except Exception as exc:
-                telegram_send(token, chat_id, f"❌ 连接失败: {exc}")
+                telegram_send(token, chat_id, f"❌ 连接失败: {exc}\n\n👉 发送 /nodes 换个节点重试")
 
         threading.Thread(target=worker, daemon=True).start()
-        telegram_send(token, chat_id, f"正在连接节点 {node_id} ，完成后会通知结果...")
+        telegram_send(token, chat_id, f"🔌 正在连接节点 {node_id} ，完成后会通知结果...")
     elif command == "/disconnect":
         manual_disconnect("Telegram 手动断开连接")
-        telegram_send(token, chat_id, "已断开连接并停用自动重连，发送 /connect 可重新连接")
+        telegram_send(token, chat_id, "⛔ 已断开连接并停用自动重连\n\n👉 发送 /connect 序号 可重新连接")
     elif command == "/refresh":
         if maintenance_lock.locked():
-            telegram_send(token, chat_id, "节点维护任务正在运行，请稍后再试")
+            telegram_send(token, chat_id, "⏳ 节点维护任务正在运行，请稍后再试")
         else:
             threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
-            telegram_send(token, chat_id, "已在后台启动节点更新流程，稍后用 /nodes 查看结果")
+            telegram_send(token, chat_id, "🔄 已在后台启动节点更新流程\n\n👉 稍后发送 /nodes 查看结果")
     else:
-        telegram_send(token, chat_id, f"未知命令: {command}\n\n{TELEGRAM_HELP_TEXT}")
+        telegram_send(token, chat_id, f"❓ 未知命令: {command}\n\n{TELEGRAM_HELP_TEXT}")
 
 def telegram_bot_loop() -> None:
     offset = 0
@@ -6010,12 +6014,12 @@ def telegram_bot_loop() -> None:
             if chat_id is None or not text:
                 continue
             if str(chat_id) not in allowed_ids:
-                telegram_send(token, chat_id, f"未授权。请在管理页面「代理设置」中把此 Chat ID 加入白名单: {chat_id}")
+                telegram_send(token, chat_id, f"🚫 未授权\n\n👉 请在管理页面「代理设置」中把此 Chat ID 加入白名单: {chat_id}")
                 continue
             try:
                 telegram_handle_command(token, chat_id, text)
             except Exception as exc:
-                telegram_send(token, chat_id, f"命令执行出错: {exc}")
+                telegram_send(token, chat_id, f"❌ 命令执行出错: {exc}")
 
 def main() -> None:
     ensure_dirs()
